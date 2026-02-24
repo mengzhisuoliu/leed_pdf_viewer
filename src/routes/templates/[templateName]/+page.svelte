@@ -9,7 +9,7 @@
 	import Toolbar from '$lib/components/Toolbar.svelte';
 	import KeyboardShortcuts from '$lib/components/KeyboardShortcuts.svelte';
 	import PageThumbnails from '$lib/components/PageThumbnails.svelte';
-	import { isValidLPDFFile, isValidPDFFile } from '$lib/utils/pdfUtils';
+	import { isValidLPDFFile, isValidPDFFile, isValidImageFile } from '$lib/utils/pdfUtils';
 	import {
 		forceSaveAllAnnotations,
 		pdfState,
@@ -26,6 +26,7 @@
 	import { getFormattedVersion } from '$lib/utils/version';
 	import { isTauri } from '$lib/utils/tauriUtils';
 	import { MAX_FILE_SIZE } from '$lib/constants';
+	import { convertImageToPDF } from '$lib/utils/imageImport';
 	import HelpButton from '$lib/components/HelpButton.svelte';
 	import HomeButton from '$lib/components/HomeButton.svelte';
 	import Footer from '$lib/components/Footer.svelte';
@@ -33,6 +34,7 @@
 	import SharePDFModal from '$lib/components/SharePDFModal.svelte';
 	import GlobalStyles from '$lib/components/GlobalStyles.svelte';
 	import CompressedPDFExport from '$lib/components/CompressedPDFExport.svelte';
+	import PngExport from '$lib/components/PngExport.svelte';
 	import { keyboardShortcuts } from '$lib/utils/keyboardShortcuts';
 	import { handleFileUploadClick, handleStampToolClick } from '$lib/utils/pageKeyboardHelpers';
 
@@ -52,6 +54,7 @@
 	let showShareModal = false;
 
 	let compressedPDFExport: CompressedPDFExport;
+	let pngExport: PngExport;
 
 	// Load template PDF if it exists
 	$: if (browser && data) {
@@ -136,10 +139,11 @@
 
 		const isPDF = isValidPDFFile(file);
 		const isLPDF = isValidLPDFFile(file);
+		const isImage = isValidImageFile(file);
 
-		if (!isPDF && !isLPDF) {
+		if (!isPDF && !isLPDF && !isImage) {
 			console.log('Invalid file type');
-			toastStore.error('Invalid File', 'Please choose a valid PDF or LPDF file.');
+			toastStore.error('Invalid File', 'Please choose a valid PDF, LPDF, or image file.');
 			return;
 		}
 
@@ -195,20 +199,50 @@
 
 		console.log('Storing file and navigating to pdf-upload route');
 		// Store file in sessionStorage temporarily and navigate to upload route
+
+		let fileToStore = file;
+
+		// If it's an image file, convert it to PDF first
+		if (isImage) {
+			console.log('Converting image file to PDF...');
+			toastStore.info('Converting...', 'Converting image to PDF, please wait...');
+			try {
+				fileToStore = await convertImageToPDF(file);
+				console.log('Image converted to PDF successfully');
+			} catch (conversionError) {
+				console.error('Failed to convert image to PDF:', conversionError);
+				toastStore.error(
+					'Conversion Failed',
+					'Failed to convert image to PDF. Please check your file.'
+				);
+				return;
+			}
+		}
+
+		// Guard: converted PDF must also be within the size limit
+		if (fileToStore.size > MAX_FILE_SIZE) {
+			console.log('Converted PDF too large:', fileToStore.size);
+			toastStore.error(
+				'File Too Large',
+				`Converted PDF size (${(fileToStore.size / (1024 * 1024)).toFixed(1)}MB) exceeds the maximum limit of ${MAX_FILE_SIZE / (1024 * 1024)}MB.`
+			);
+			return;
+		}
+
 		const fileReader = new FileReader();
 		fileReader.onload = (e) => {
 			const arrayBuffer = e.target?.result as ArrayBuffer;
 			const fileData = {
-				name: file.name,
-				size: file.size,
-				type: file.type,
+				name: fileToStore.name,
+				size: fileToStore.size,
+				type: fileToStore.type,
 				data: Array.from(new Uint8Array(arrayBuffer))
 			};
 			sessionStorage.setItem('tempPdfFile', JSON.stringify(fileData));
 			console.log('File stored in sessionStorage, navigating...');
 			goto('/pdf-upload');
 		};
-		fileReader.readAsArrayBuffer(file);
+		fileReader.readAsArrayBuffer(fileToStore);
 	}
 
 	async function handleFileFromCommandLine(filePath: string): Promise<boolean> {
@@ -596,6 +630,14 @@
 		compressedPDFExport?.open();
 	}
 
+	function handleExportPNG() {
+		if (!currentFile || !pdfViewer) {
+			toastStore.warning('No PDF', 'No PDF to export');
+			return;
+		}
+		pngExport?.open();
+	}
+
 	async function getAnnotatedPdfForCompression() {
 		forceSaveAllAnnotations();
 		const { pdfBytes, originalName } = await getPdfBytesAndName(
@@ -683,6 +725,7 @@
 			onExportLPDF={handleExportLPDF}
 			onExportDOCX={handleExportDOCX}
 			onExportCompressedPDF={handleExportCompressedPDF}
+			onExportPNG={handleExportPNG}
 			onSharePDF={handleSharePDF}
 			{showThumbnails}
 			onToggleThumbnails={handleToggleThumbnails}
@@ -764,6 +807,22 @@
 <CompressedPDFExport
 	bind:this={compressedPDFExport}
 	getAnnotatedPdf={currentFile && pdfViewer ? getAnnotatedPdfForCompression : null}
+/>
+
+<!-- PNG Export (progress card) -->
+<PngExport
+	bind:this={pngExport}
+	getExportContext={currentFile && pdfViewer
+		? () => ({
+				pdfViewer,
+				currentPage: $pdfState.currentPage,
+				totalPages: $pdfState.totalPages,
+				baseName:
+					typeof currentFile === 'string'
+						? data.templateName || 'template'
+						: (currentFile?.name || 'document').replace(/\.pdf$/i, '')
+			})
+		: null}
 />
 
 <!-- Keyboard shortcuts modal -->

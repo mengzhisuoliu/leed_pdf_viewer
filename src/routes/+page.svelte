@@ -17,6 +17,7 @@
 	import DragOverlay from '$lib/components/DragOverlay.svelte';
 	import BrowserExtensionPromotion from '$lib/components/BrowserExtensionPromotion.svelte';
 	import CompressedPDFExport from '$lib/components/CompressedPDFExport.svelte';
+	import PngExport from '$lib/components/PngExport.svelte';
 	import DesktopDownloadCard from '$lib/components/DesktopDownloadCard.svelte';
 	import DropboxChooser from '$lib/components/DropboxChooser.svelte';
 	import {
@@ -36,17 +37,16 @@
 	import { PDFExporter } from '$lib/utils/pdfExport';
 	import { exportCurrentPDFAsLPDF, importLPDFFile } from '$lib/utils/lpdfExport';
 	import { exportCurrentPDFAsDocx } from '$lib/utils/docxExport';
-	import {
-		getPdfBytesAndName,
-		buildAnnotatedPdfExporter
-	} from '$lib/utils/exportHandlers';
+	import { getPdfBytesAndName, buildAnnotatedPdfExporter } from '$lib/utils/exportHandlers';
 	import {
 		createBlankPDF,
 		isValidLPDFFile,
 		isValidMarkdownFile,
+		isValidImageFile,
 		isValidPDFFile
 	} from '$lib/utils/pdfUtils';
-	import { convertMarkdownToPDF, readMarkdownFile } from '$lib/utils/markdownUtils';
+	import { readMarkdownFile, convertMarkdownToPDF } from '$lib/utils/markdownUtils';
+	import { convertImageToPDF } from '$lib/utils/imageImport';
 	import { trackFullscreenToggle, trackPdfExport } from '$lib/utils/analytics';
 	import { keyboardShortcuts } from '$lib/utils/keyboardShortcuts';
 	import { handleFileUploadClick, handleStampToolClick } from '$lib/utils/pageKeyboardHelpers';
@@ -70,6 +70,7 @@
 	let isDropboxLoading = false;
 
 	let compressedPDFExport: CompressedPDFExport;
+	let pngExport: PngExport;
 
 	// File loading variables
 	// (hasLoadedFromCommandLine removed - was unused dead code)
@@ -118,10 +119,11 @@
 		const isPDF = isValidPDFFile(file);
 		const isMarkdown = isValidMarkdownFile(file);
 		const isLPDF = isValidLPDFFile(file);
+		const isImage = isValidImageFile(file);
 
-		if (!isPDF && !isMarkdown && !isLPDF) {
+		if (!isPDF && !isMarkdown && !isLPDF && !isImage) {
 			console.log('Invalid file type');
-			toastStore.error('Invalid File', 'Please choose a valid PDF, Markdown, or LPDF file.');
+			toastStore.error('Invalid File', 'Please choose a valid PDF, Markdown, LPDF, or image file.');
 			return;
 		}
 
@@ -199,6 +201,31 @@
 					);
 					return;
 				}
+			} else if (isImage) {
+				console.log('Converting image file to PDF...');
+				toastStore.info('Converting...', 'Converting image to PDF, please wait...');
+
+				try {
+					fileToStore = await convertImageToPDF(file);
+					console.log('Image converted to PDF successfully');
+				} catch (conversionError) {
+					console.error('Failed to convert image to PDF:', conversionError);
+					toastStore.error(
+						'Conversion Failed',
+						'Failed to convert image to PDF. Please check your file.'
+					);
+					return;
+				}
+			}
+
+			// Guard: converted file must also pass the size limit
+			if (fileToStore.size > MAX_FILE_SIZE) {
+				console.log('Converted PDF too large:', fileToStore.size);
+				toastStore.error(
+					'File Too Large',
+					`Converted PDF size (${(fileToStore.size / (1024 * 1024)).toFixed(1)}MB) exceeds the maximum limit of ${MAX_FILE_SIZE / (1024 * 1024)}MB.`
+				);
+				return;
 			}
 
 			// Store the file (original PDF or converted from markdown) in IndexedDB/sessionStorage
@@ -822,6 +849,14 @@
 		compressedPDFExport?.open();
 	}
 
+	function handleExportPNG() {
+		if (!currentFile || !pdfViewer) {
+			toastStore.warning('No PDF', 'No PDF to export');
+			return;
+		}
+		pngExport?.open();
+	}
+
 	async function getAnnotatedPdfForCompression() {
 		forceSaveAllAnnotations();
 		const { pdfBytes, originalName } = await getPdfBytesAndName(
@@ -1077,6 +1112,7 @@
 			onExportLPDF={handleExportLPDF}
 			onExportDOCX={handleExportDOCX}
 			onExportCompressedPDF={handleExportCompressedPDF}
+			onExportPNG={handleExportPNG}
 			{showThumbnails}
 			onToggleThumbnails={handleToggleThumbnails}
 			{presentationMode}
@@ -1291,6 +1327,23 @@
 	onExportSuccess={(filename, size) => trackPdfExport('compressed_pdf', $pdfState.totalPages, size)}
 />
 
+<!-- PNG Export (progress card) - outside main to avoid fixed-position clipping -->
+<PngExport
+	bind:this={pngExport}
+	getExportContext={currentFile && pdfViewer
+		? () => ({
+				pdfViewer,
+				currentPage: $pdfState.currentPage,
+				totalPages: $pdfState.totalPages,
+				baseName:
+					typeof currentFile === 'string'
+						? extractFilenameFromUrl(currentFile).replace(/\.pdf$/i, '')
+						: (currentFile?.name || 'document').replace(/\.pdf$/i, '')
+			})
+		: null}
+	onExportSuccess={(_filename) => trackPdfExport('png', $pdfState.totalPages)}
+/>
+
 <KeyboardShortcuts bind:isOpen={showShortcuts} on:close={() => (showShortcuts = false)} />
 <TemplatePicker bind:isOpen={showTemplatePicker} on:close={() => (showTemplatePicker = false)} />
 <DebugPanel bind:isVisible={showDebugPanel} />
@@ -1306,7 +1359,7 @@
 <!-- Hidden file input -->
 <input
 	type="file"
-	accept=".pdf,.lpdf,.md,.markdown"
+	accept=".pdf,.lpdf,.md,.markdown,.png,.jpg,.jpeg,.webp"
 	multiple={false}
 	class="hidden"
 	on:change={(event) => {

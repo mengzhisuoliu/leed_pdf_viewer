@@ -27,20 +27,24 @@
 	import { PDFExporter } from '$lib/utils/pdfExport';
 	import { exportCurrentPDFAsLPDF, importLPDFFile } from '$lib/utils/lpdfExport';
 	import { exportCurrentPDFAsDocx } from '$lib/utils/docxExport';
-	import {
-		getPdfBytesAndName,
-		buildAnnotatedPdfExporter
-	} from '$lib/utils/exportHandlers';
+	import { getPdfBytesAndName, buildAnnotatedPdfExporter } from '$lib/utils/exportHandlers';
 	import { toastStore } from '$lib/stores/toastStore';
 	import { retrieveUploadedFile } from '$lib/utils/fileStorageUtils';
 	import { MAX_FILE_SIZE } from '$lib/constants';
 	import { isTauri } from '$lib/utils/tauriUtils';
 	import { getFormattedVersion } from '$lib/utils/version';
-	import { isValidLPDFFile, isValidMarkdownFile, isValidPDFFile } from '$lib/utils/pdfUtils';
+	import {
+		isValidLPDFFile,
+		isValidMarkdownFile,
+		isValidPDFFile,
+		isValidImageFile
+	} from '$lib/utils/pdfUtils';
 	import { convertMarkdownToPDF, readMarkdownFile } from '$lib/utils/markdownUtils';
+	import { convertImageToPDF } from '$lib/utils/imageImport';
 	import { trackFullscreenToggle, trackPdfExport } from '$lib/utils/analytics';
 	import SharePDFModal from '$lib/components/SharePDFModal.svelte';
 	import CompressedPDFExport from '$lib/components/CompressedPDFExport.svelte';
+	import PngExport from '$lib/components/PngExport.svelte';
 	import { keyboardShortcuts } from '$lib/utils/keyboardShortcuts';
 	import { handleFileUploadClick, handleStampToolClick } from '$lib/utils/pageKeyboardHelpers';
 
@@ -57,6 +61,7 @@
 	let showShareModal = false;
 
 	let compressedPDFExport: CompressedPDFExport;
+	let pngExport: PngExport;
 
 	// File loading variables
 	// (hasLoadedFromCommandLine removed - was unused dead code)
@@ -229,10 +234,11 @@
 		const isPDF = isValidPDFFile(file);
 		const isMarkdown = isValidMarkdownFile(file);
 		const isLPDF = isValidLPDFFile(file);
+		const isImage = isValidImageFile(file);
 
-		if (!isPDF && !isMarkdown && !isLPDF) {
+		if (!isPDF && !isMarkdown && !isLPDF && !isImage) {
 			console.log('Invalid file type');
-			toastStore.error('Invalid File', 'Please choose a valid PDF, Markdown, or LPDF file.');
+			toastStore.error('Invalid File', 'Please choose a valid PDF, Markdown, LPDF, or image file.');
 			return;
 		}
 
@@ -283,6 +289,11 @@
 				const pdfFilename = file.name.replace(/\.(md|markdown|mdown|mkd|mkdn)$/i, '.pdf');
 				fileToUse = await convertMarkdownToPDF(markdownContent, pdfFilename);
 				console.log('Markdown converted to PDF successfully');
+			} else if (isImage) {
+				console.log('Converting image file to PDF...');
+				toastStore.info('Converting...', 'Converting image to PDF, please wait...');
+				fileToUse = await convertImageToPDF(file);
+				console.log('Image converted to PDF successfully');
 			}
 
 			console.log('Setting currentFile');
@@ -767,6 +778,14 @@
 		compressedPDFExport?.open();
 	}
 
+	function handleExportPNG() {
+		if (!currentFile || !pdfViewer) {
+			toastStore.warning('No PDF', 'No PDF to export');
+			return;
+		}
+		pngExport?.open();
+	}
+
 	async function getAnnotatedPdfForCompression() {
 		forceSaveAllAnnotations();
 		const { pdfBytes, originalName } = await getPdfBytesAndName(
@@ -862,6 +881,7 @@
 				onExportLPDF={handleExportLPDF}
 				onExportDOCX={handleExportDOCX}
 				onExportCompressedPDF={handleExportCompressedPDF}
+				onExportPNG={handleExportPNG}
 				onSharePDF={handleSharePDF}
 				{showThumbnails}
 				onToggleThumbnails={handleToggleThumbnails}
@@ -875,16 +895,16 @@
 					}
 				}}
 			/>
-	{/if}
+		{/if}
 
-	<div class="w-full h-full" class:pt-12={!focusMode && !presentationMode}>
-		<div class="flex h-full">
-			{#if showThumbnails}
-				<PageThumbnails isVisible={showThumbnails} onPageSelect={handlePageSelect} />
-			{/if}
+		<div class="w-full h-full" class:pt-12={!focusMode && !presentationMode}>
+			<div class="flex h-full">
+				{#if showThumbnails}
+					<PageThumbnails isVisible={showThumbnails} onPageSelect={handlePageSelect} />
+				{/if}
 
-			<div class="flex-1">
-				<PDFViewer bind:this={pdfViewer} pdfFile={currentFile} {presentationMode} />
+				<div class="flex-1">
+					<PDFViewer bind:this={pdfViewer} pdfFile={currentFile} {presentationMode} />
 				</div>
 			</div>
 		</div>
@@ -929,6 +949,22 @@
 	getAnnotatedPdf={currentFile && pdfViewer ? getAnnotatedPdfForCompression : null}
 />
 
+<!-- PNG Export (progress card) -->
+<PngExport
+	bind:this={pngExport}
+	getExportContext={currentFile && pdfViewer
+		? () => ({
+				pdfViewer,
+				currentPage: $pdfState.currentPage,
+				totalPages: $pdfState.totalPages,
+				baseName:
+					typeof currentFile === 'string'
+						? extractFilenameFromUrl(currentFile).replace(/\.pdf$/i, '')
+						: (currentFile?.name || 'document').replace(/\.pdf$/i, '')
+			})
+		: null}
+/>
+
 <KeyboardShortcuts bind:isOpen={showShortcuts} on:close={() => (showShortcuts = false)} />
 <DebugPanel bind:isVisible={showDebugPanel} />
 
@@ -949,7 +985,7 @@
 <!-- Hidden file input -->
 <input
 	type="file"
-	accept=".pdf,.lpdf,.md,.markdown"
+	accept=".pdf,.lpdf,.md,.markdown,.png,.jpg,.jpeg,.webp"
 	multiple={false}
 	class="hidden"
 	on:change={(event) => {
